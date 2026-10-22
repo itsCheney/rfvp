@@ -499,6 +499,9 @@ fn obj<'a>(v: V) -> &'a mut Obj {
 /// The text of a string from the script (`addr` is where it is in the HCB; its length, NUL
 /// included, is the byte before).
 fn script_string(addr: u32) -> String {
+    if let Some(text) = unsafe { (*rt().parser).translated_string(addr as usize) } {
+        return text;
+    }
     if let Some(bytes) = short_string(addr) {
         return unsafe { (*rt().parser).decode_string_bytes(bytes) }.unwrap_or_default();
     }

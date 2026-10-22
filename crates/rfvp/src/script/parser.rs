@@ -101,6 +101,8 @@ pub struct Parser {
     game_title: String,
     pub syscall_count: u16,
     pub syscalls: SyscallMap,
+    /// Translated script strings by HCB offset (see `script::text_patch`).
+    text_patch: Option<alloc::sync::Arc<alloc::collections::BTreeMap<u32, String>>>,
 }
 
 /// See `Parser::window`.
@@ -176,6 +178,7 @@ impl Parser {
                 game_title: String::new(),
                 syscall_count: 0,
                 syscalls: SyscallMap::default(),
+                text_patch: None,
             };
 
             uefi_parser_stage!("[UEFI] Parser::from_bytes before parser()");
@@ -219,6 +222,7 @@ impl Parser {
             game_title: String::new(),
             syscall_count: 0,
             syscalls: SyscallMap::default(),
+            text_patch: None,
         };
 
         parser.parser()?;
@@ -355,6 +359,9 @@ impl Parser {
     /// (with null terminator)
     /// then convert it to a UTF-8 string due to the NLS
     pub fn read_cstring(&self, offset: usize, len: usize) -> Result<String> {
+        if let Some(text) = self.translated_string(offset) {
+            return Ok(text);
+        }
         #[cfg(feature = "old_school")]
         {
             if offset
@@ -390,6 +397,19 @@ impl Parser {
 
             self.decode_string_bytes(&string)
         }
+    }
+
+    /// Shows `patch` (translated strings by the offset of their bytes in the HCB) in place of
+    /// the script's own strings.
+    pub fn set_text_patch(&mut self, patch: alloc::collections::BTreeMap<u32, String>) {
+        self.text_patch = (!patch.is_empty()).then(|| alloc::sync::Arc::new(patch));
+    }
+
+    /// The translation of the script string whose bytes start at `offset`, if a text patch
+    /// has one.
+    pub fn translated_string(&self, offset: usize) -> Option<String> {
+        let offset = u32::try_from(offset).ok()?;
+        self.text_patch.as_ref()?.get(&offset).cloned()
     }
 
     pub(crate) fn decode_string_bytes(&self, string: &[u8]) -> Result<String> {

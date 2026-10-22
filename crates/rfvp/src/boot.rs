@@ -39,5 +39,9 @@ pub fn load_script(nls: Nls) -> Result<Parser> {
         }
     }
 
-    Parser::new(opcode_path, nls)
+    let mut parser = Parser::new(&opcode_path, nls)?;
+    if let Some(dir) = opcode_path.parent() {
+        crate::script::text_patch::apply(&mut parser, dir);
+    }
+    Ok(parser)
 }
