@@ -1536,6 +1536,15 @@ impl App {
     pub fn find_hcb(game_path: impl AsRef<Path>) -> Result<PathBuf> {
         let dir = game_path.as_ref().to_path_buf();
 
+        #[cfg(not(target_os = "uefi"))]
+        if let Some(name) = crate::utils::file::preferred_script() {
+            let path = dir.join(&name);
+            if path.is_file() {
+                return Ok(path);
+            }
+            log::warn!("Preferred script {name} not found in {}", dir.display());
+        }
+
         // Prefer translated BCH patch scripts (`*.bch`, same HCB container
         // format, produced by CHS/CHT patches) and fall back to the original
         // `*.hcb` script.
@@ -1908,6 +1917,58 @@ impl App {
             }
         }
 
+    }
+
+    /// Inject a key event from an iOS host by Windows virtual-key code, as
+    /// `host_key_android`: `0x1B` Escape, `0x0D` Enter, `0x20` Space,
+    /// `0x25..0x28` arrows, `0x11` Control. Unknown codes are ignored.
+    #[cfg(target_os = "ios")]
+    pub fn host_key_vk_ios(&mut self, vk_code: i32, down: bool) {
+        use winit::keyboard::{Key, NamedKey};
+
+        let key = match vk_code {
+            0x1B => Key::Named(NamedKey::Escape),
+            0x0D => Key::Named(NamedKey::Enter),
+            0x20 => Key::Named(NamedKey::Space),
+            0x25 => Key::Named(NamedKey::ArrowLeft),
+            0x26 => Key::Named(NamedKey::ArrowUp),
+            0x27 => Key::Named(NamedKey::ArrowRight),
+            0x28 => Key::Named(NamedKey::ArrowDown),
+            0x11 => Key::Named(NamedKey::Control),
+            _ => return,
+        };
+
+        // A release always goes through, so a key held when a dialog opens is not stuck.
+        if down && (self.exit_confirm_ui.is_active() || self.legacy_save_load_ui.is_active()) {
+            return;
+        }
+
+        let mut gd = gd_write(&self.game_data);
+        if down {
+            gd.inputs_manager.notify_keydown(key, false);
+        } else {
+            gd.inputs_manager.notify_keyup(key);
+        }
+    }
+
+    /// The game's own resolution, which the surface letterboxes.
+    #[cfg(target_os = "ios")]
+    pub fn host_virtual_size(&self) -> (u32, u32) {
+        self.virtual_size
+    }
+
+    /// The host is going to the background (`false`) or coming back. Sounds
+    /// pause while away, and the global save is written on the way out, as
+    /// the app may not come back.
+    #[cfg(target_os = "ios")]
+    pub fn host_set_foreground(&mut self, foreground: bool) {
+        let gd = gd_read(&self.game_data);
+        gd.audio_manager().set_suspended(!foreground);
+        if !foreground {
+            if let Err(e) = crate::subsystem::global_savedata::save_global_savedata_v1(&gd) {
+                log::error!("Failed to save global savedata: {:#}", e);
+            }
+        }
     }
 
     /// Inject a key event from an Android host.

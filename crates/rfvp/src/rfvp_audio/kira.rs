@@ -226,6 +226,17 @@ impl AudioBackend for KiraBackend {
             .main_track()
             .set_volume(decibels(volume), kira::Tween::default());
     }
+
+    fn set_suspended(&self, suspended: bool) {
+        // Stopped sounds ignore both.
+        for handle in self.channels().values_mut().filter_map(|c| c.handle.as_mut()) {
+            if suspended {
+                handle.pause(kira::Tween::default());
+            } else {
+                handle.resume(kira::Tween::default());
+            }
+        }
+    }
 }
 
 /// A VFS stream as a Symphonia media source, so kira streams sounds from the packs.

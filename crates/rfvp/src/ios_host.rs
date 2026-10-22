@@ -23,8 +23,35 @@ use crate::subsystem::anzu_scene::AnzuScene;
 use crate::subsystem::resources::thread_manager::ThreadManager;
 use crate::utils::file::set_base_path;
 
-struct IosInstance {
-    app: Box<App>,
+pub(crate) struct IosInstance {
+    pub(crate) app: Box<App>,
+}
+
+/// Runs `f`, turning a panic into an error, so no panic unwinds into the
+/// host (which would abort the process).
+pub(crate) fn guard<R>(what: &str, f: impl FnOnce() -> Result<R>) -> Result<R> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            Err(anyhow::anyhow!("{what} panicked: {message}"))
+        }
+    }
+}
+
+/// Like `guard` for calls with no result: a panic is logged and dropped.
+pub(crate) fn guard_void(what: &str, f: impl FnOnce()) {
+    if let Err(e) = guard(what, || {
+        f();
+        Ok(())
+    }) {
+        log::error!("{e:#}");
+        crate::mikage_host::set_last_error(&format!("{e:#}"));
+    }
 }
 
 fn cstr_to_string(ptr: *const c_char) -> Result<String> {
@@ -45,6 +72,9 @@ fn build_app(
     game_root: &str,
     nls: Nls,
 ) -> Result<Box<App>> {
+    if !crate::subsystem::resources::host_fonts::has_default_face() {
+        anyhow::bail!("no font registered for MS Gothic");
+    }
     set_base_path(game_root);
     let parser = load_script(nls)?;
     let title = parser.get_title();
@@ -86,7 +116,7 @@ pub unsafe extern "C" fn rfvp_ios_create(
     let view = match NonNull::new(ui_view) {
         Some(v) => v,
         None => {
-            eprintln!("[RFVP-IOS] rfvp_ios_create: ui_view is null");
+            crate::mikage_host::set_last_error("rfvp_ios_create: ui_view is null");
             return std::ptr::null_mut();
         }
     };
@@ -94,7 +124,7 @@ pub unsafe extern "C" fn rfvp_ios_create(
     let root = match cstr_to_string(game_root_utf8) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[RFVP-IOS] rfvp_ios_create: invalid game_root_path: {e:?}");
+            crate::mikage_host::set_last_error(&format!("invalid game root: {e:#}"));
             return std::ptr::null_mut();
         }
     };
@@ -104,7 +134,7 @@ pub unsafe extern "C" fn rfvp_ios_create(
     let nls_str = match cstr_to_string(nls_utf8) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[RFVP-IOS] rfvp_ios_create: invalid nls: {e:?}");
+            crate::mikage_host::set_last_error(&format!("invalid nls: {e:#}"));
             return std::ptr::null_mut();
         }
     };
@@ -112,25 +142,29 @@ pub unsafe extern "C" fn rfvp_ios_create(
     let nls: Nls = match nls_str.parse() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("[RFVP-IOS] rfvp_ios_create: invalid NLS '{nls_str}': {e:?}");
+            crate::mikage_host::set_last_error(&format!("invalid NLS '{nls_str}': {e:?}"));
             return std::ptr::null_mut();
         }
     };
 
-    match build_app(
-        view,
-        surface_width,
-        surface_height,
-        native_scale_factor,
-        &root,
-        nls,
-    ) {
+    crate::mikage_host::set_last_error("");
+    match guard("rfvp_ios_create", || {
+        build_app(
+            view,
+            surface_width,
+            surface_height,
+            native_scale_factor,
+            &root,
+            nls,
+        )
+    }) {
         Ok(app) => {
             let inst = Box::new(IosInstance { app });
             Box::into_raw(inst) as *mut c_void
         }
         Err(e) => {
-            eprintln!("[RFVP-IOS] rfvp_ios_create: build failed: {e:?}");
+            log::error!("rfvp_ios_create: build failed: {e:?}");
+            crate::mikage_host::set_last_error(&format!("{e:#}"));
             std::ptr::null_mut()
         }
     }
@@ -145,11 +179,14 @@ pub unsafe extern "C" fn rfvp_ios_step(handle: *mut c_void, dt_ms: u32) -> i32 {
         return 1;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    let should_exit = inst.app.host_step(dt_ms);
-    if should_exit {
-        1
-    } else {
-        0
+    match guard("rfvp_ios_step", || Ok(inst.app.host_step(dt_ms))) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            log::error!("{e:#}");
+            crate::mikage_host::set_last_error(&format!("{e:#}"));
+            1
+        }
     }
 }
 
@@ -166,7 +203,7 @@ pub unsafe extern "C" fn rfvp_ios_resize(
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app.host_resize(surface_width, surface_height);
+    guard_void("rfvp_ios", || inst.app.host_resize(surface_width, surface_height));
 }
 
 /// Deliver a touch event from the iOS host.
@@ -184,7 +221,7 @@ pub unsafe extern "C" fn rfvp_ios_touch(
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app.host_touch(phase, x_points, y_points);
+    guard_void("rfvp_ios", || inst.app.host_touch(phase, x_points, y_points));
 }
 
 /// Deliver a mouse-button event from the iOS host.
@@ -204,8 +241,10 @@ pub unsafe extern "C" fn rfvp_ios_mouse_button(
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app
-        .host_mouse_button_ios(button, phase, x_points, y_points);
+    guard_void("rfvp_ios_mouse_button", || {
+        inst.app
+            .host_mouse_button_ios(button, phase, x_points, y_points)
+    });
 }
 
 /// Deliver a mouse-wheel event from the iOS host.
@@ -223,7 +262,7 @@ pub unsafe extern "C" fn rfvp_ios_mouse_wheel(
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app.host_mouse_wheel_ios(delta, x_points, y_points);
+    guard_void("rfvp_ios", || inst.app.host_mouse_wheel_ios(delta, x_points, y_points));
 }
 
 /// Deliver a key event from the iOS host.
@@ -236,7 +275,7 @@ pub unsafe extern "C" fn rfvp_ios_key(handle: *mut c_void, key: i32, phase: i32)
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app.host_key_ios(key, phase);
+    guard_void("rfvp_ios", || inst.app.host_key_ios(key, phase));
 }
 
 /// Enable or disable HiDPI text backing surfaces without changing the iOS create ABI.
@@ -246,7 +285,7 @@ pub unsafe extern "C" fn rfvp_ios_set_text_hidpi(handle: *mut c_void, enabled: i
         return;
     }
     let inst = &mut *(handle as *mut IosInstance);
-    inst.app.set_text_hidpi_enabled(enabled != 0);
+    guard_void("rfvp_ios", || inst.app.set_text_hidpi_enabled(enabled != 0));
 }
 
 /// Destroy the iOS host-mode instance.
@@ -255,5 +294,6 @@ pub unsafe extern "C" fn rfvp_ios_destroy(handle: *mut c_void) {
     if handle.is_null() {
         return;
     }
-    drop(Box::from_raw(handle as *mut IosInstance));
+    let inst = Box::from_raw(handle as *mut IosInstance);
+    guard_void("rfvp_ios_destroy", || drop(inst));
 }

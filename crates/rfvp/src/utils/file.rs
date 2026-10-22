@@ -60,6 +60,27 @@ pub fn set_hcb_root_path(path: &str) {
 #[cfg(target_os = "uefi")]
 pub fn set_hcb_root_path(_path: &str) {}
 
+/// The script file (by name, in the game directory) a host picked to run
+/// instead of the first `*.bch` / `*.hcb` found, as when a translation patch
+/// sits beside the original script.
+#[cfg(not(target_os = "uefi"))]
+static PREFERRED_SCRIPT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(not(target_os = "uefi"))]
+pub fn set_preferred_script(name: Option<String>) {
+    *PREFERRED_SCRIPT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = name.filter(|n| !n.is_empty());
+}
+
+#[cfg(not(target_os = "uefi"))]
+pub fn preferred_script() -> Option<String> {
+    PREFERRED_SCRIPT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
 #[cfg(not(target_os = "uefi"))]
 pub fn hcb_root_path() -> Option<PathBuf> {
     env::var("FVP_HCB_ROOT")
@@ -130,12 +151,85 @@ pub fn desktop_vfs(
     crate::subsystem::resources::vfs::Vfs::from_dir(nls, std::sync::Arc::new(dir))
 }
 
-/// Where a desktop keeps saves: the game directory (they go in its `save/` folder).
+/// The folder of the game directory that holds saves instead of `save/`,
+/// when a host keeps saves in a folder of its own (Mikage: `savedata`).
+#[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
+static SAVE_DIR_NAME: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
+pub fn set_save_dir_name(name: Option<String>) {
+    *SAVE_DIR_NAME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        name.map(|n| n.trim_matches('/').to_string()).filter(|n| !n.is_empty());
+}
+
+/// Where a desktop keeps saves: the game directory (they go in its `save/` folder,
+/// or the one set with [`set_save_dir_name`]).
 #[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
 pub fn desktop_storage() -> std::sync::Arc<dyn crate::host_api::RfvpStorage> {
-    std::sync::Arc::new(crate::host_api::std_fs::StdDir::new(
-        app_base_path().get_path().clone(),
-    ))
+    let dir = crate::host_api::std_fs::StdDir::new(app_base_path().get_path().clone());
+    let renamed = SAVE_DIR_NAME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    match renamed {
+        Some(save_dir) => std::sync::Arc::new(RenamedSaveDir { inner: dir, save_dir }),
+        None => std::sync::Arc::new(dir),
+    }
+}
+
+/// A game directory whose `save/` folder is called `save_dir`.
+#[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
+struct RenamedSaveDir {
+    inner: crate::host_api::std_fs::StdDir,
+    save_dir: String,
+}
+
+#[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
+impl RenamedSaveDir {
+    fn path(&self, path: &str) -> String {
+        let path = path.trim_start_matches("./");
+        match path.strip_prefix("save") {
+            Some("") => self.save_dir.clone(),
+            Some(rest) if rest.starts_with('/') => format!("{}{rest}", self.save_dir),
+            _ => path.to_string(),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "uefi", target_arch = "wasm32")))]
+impl crate::host_api::RfvpStorage for RenamedSaveDir {
+    fn read(&self, path: &str) -> crate::host_api::RfvpResult<Vec<u8>> {
+        self.inner.read(&self.path(path))
+    }
+
+    fn read_prefix(&self, path: &str, max_len: usize) -> crate::host_api::RfvpResult<Vec<u8>> {
+        self.inner.read_prefix(&self.path(path), max_len)
+    }
+
+    fn write(&self, path: &str, bytes: &[u8]) -> crate::host_api::RfvpResult<()> {
+        self.inner.write(&self.path(path), bytes)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(&self.path(path))
+    }
+
+    fn remove(&self, path: &str) -> crate::host_api::RfvpResult<()> {
+        self.inner.remove(&self.path(path))
+    }
+
+    fn list(&self, dir: &str) -> crate::host_api::RfvpResult<Vec<String>> {
+        self.inner.list(&self.path(dir))
+    }
+
+    fn open(
+        &self,
+        path: &str,
+    ) -> crate::host_api::RfvpResult<Box<dyn crate::host_api::RfvpFile + Send>> {
+        self.inner.open(&self.path(path))
+    }
 }
 
 /// The local date and time, stamped on saves.

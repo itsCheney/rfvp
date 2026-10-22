@@ -116,6 +116,10 @@ pub trait AudioBackend: Send + Sync {
 
     /// Commands for the host, for backends that produce them ([`CommandBackend`]).
     fn drain_commands(&self, _out: &mut Vec<AudioCommand>) {}
+
+    /// Pause everything playing while the host is in the background, and
+    /// resume it after.
+    fn set_suspended(&self, _suspended: bool) {}
 }
 
 /// The audio output shared by the BGM and SE players.
@@ -159,6 +163,10 @@ impl AudioManager {
 
     pub fn drain_commands(&self, out: &mut Vec<AudioCommand>) {
         self.backend.drain_commands(out);
+    }
+
+    pub fn set_suspended(&self, suspended: bool) {
+        self.backend.set_suspended(suspended);
     }
 }
 
