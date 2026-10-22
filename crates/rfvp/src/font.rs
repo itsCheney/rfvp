@@ -212,6 +212,13 @@ impl Font {
         })
     }
 
+    /// Parse face `index` of a font file or collection from owned bytes.
+    pub fn from_vec_index(bytes: Vec<u8>, index: u32) -> Result<Self, ab_glyph::InvalidFont> {
+        Ok(Self {
+            inner: FontArc::new(ab_glyph::FontVec::try_from_vec_and_index(bytes, index)?),
+        })
+    }
+
     /// fontdue-compatible entry point. Settings are ignored; ab_glyph has no
     /// directly equivalent rendering hint cache.
     pub fn from_bytes_static(

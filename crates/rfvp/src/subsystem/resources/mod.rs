@@ -11,6 +11,8 @@ pub mod flag_manager;
 pub mod gaiji_manager;
 pub mod graph_buff;
 pub mod history_manager;
+#[cfg(not(feature = "no_std"))]
+pub mod host_fonts;
 pub mod input_manager;
 pub mod motion_manager;
 pub mod parts_manager;

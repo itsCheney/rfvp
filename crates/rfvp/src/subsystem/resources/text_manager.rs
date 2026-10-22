@@ -715,21 +715,17 @@ impl Default for FontEnumerator {
 #[cfg(not(feature = "no_std"))]
 impl FontEnumerator {
     pub fn new() -> Self {
-        // System fontfaces (special negative ids).
-        // These font files are shipped with the project under ./fonts/.
-        // ab_glyph parses the font header lazily and only outlines glyphs on
-        // demand, so this is cheap (~MB of resident bytes vs ~80 MB of
-        // pre-outlined geometry under fontdue).
-        let msgothic_b = include_bytes!("./fonts/MSGOTHIC.TTF") as &[u8];
-        let msmincho_b = include_bytes!("./fonts/MSMINCHO.TTF") as &[u8];
-        let mspgothic_b = include_bytes!("./fonts/MS-PGothic.ttf") as &[u8];
-        let mspmincho_b = include_bytes!("./fonts/MS-PMincho-2.ttf") as &[u8];
-
-        let msgothic = Font::from_static(msgothic_b).expect("MSGOTHIC.TTF must be valid");
-        // Cloning a `Font` is a refcount bump, not a deep copy.
-        let msmincho = Font::from_static(msmincho_b).unwrap_or_else(|_| msgothic.clone());
-        let mspgothic = Font::from_static(mspgothic_b).unwrap_or_else(|_| msgothic.clone());
-        let mspmincho = Font::from_static(mspmincho_b).unwrap_or_else(|_| msgothic.clone());
+        // System fontfaces (special negative ids). The MS fonts are not
+        // shipped; the host registers stand-ins (see host_fonts).
+        let [msgothic, msmincho, mspgothic, mspmincho] = super::host_fonts::system_faces();
+        let host_fallbacks = super::host_fonts::fallbacks()
+            .into_iter()
+            .map(|f| LoadedFont {
+                name: f.name,
+                file_name: f.file_name,
+                font: f.font,
+            })
+            .collect();
 
         Self {
             default_font: msgothic.clone(),
@@ -738,7 +734,7 @@ impl FontEnumerator {
             sys_ms_pgothic: mspgothic,
             sys_ms_pmincho: mspmincho,
             fonts: vec![],
-            system_fallback_fonts: vec![],
+            system_fallback_fonts: host_fallbacks,
             system_fallback_scan_done: false,
             system_fallback_enabled: false,
             system_fontface_id: FONTFACE_MS_GOTHIC,
@@ -4034,8 +4030,13 @@ mod font_enumerator_tests {
     fn add_font_file_returns_id_and_force_normalizes() {
         let dir = std::env::temp_dir().join("rfvp_font_force_test");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("MSGOTHIC.TTF");
-        std::fs::write(&path, include_bytes!("./fonts/MSGOTHIC.TTF")).unwrap();
+        let path = dir.join("BIZUDGothic-Regular.ttf");
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../rfvp-rebuilder/assets/fonts/BIZUDGothic-Regular.ttf"),
+            &path,
+        )
+        .unwrap();
 
         let mut fonts = FontEnumerator::new();
         assert_eq!(fonts.get_font_count(), 0);
