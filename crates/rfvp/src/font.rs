@@ -236,11 +236,16 @@ impl Font {
     }
 
     pub fn horizontal_line_metrics(&self, size: f32) -> Option<LineMetrics> {
-        let scaled = self.inner.as_scaled(PxScale::from(size));
-        let ascent = scaled.ascent();
+        let scaled = self.inner.as_scaled(self.em_scale(size));
         // ab_glyph::ScaleFont::descent returns a value with fontdue's sign
         // convention (negative for typical fonts), so no flip needed.
-        let descent = scaled.descent();
+        let (ascent, descent) = if self.has_em_line_box() {
+            (scaled.ascent(), scaled.descent())
+        } else {
+            // A taller line box (PingFang's is 1.4 em) would push the text down
+            // its character cell; such a face sits on the CJK em-box baseline.
+            (size * 0.88, -size * 0.12)
+        };
         let line_gap = scaled.line_gap();
         Some(LineMetrics {
             ascent,
@@ -266,8 +271,30 @@ impl Font {
         self.glyph_metrics_internal(ch, size, true)
     }
 
+    /// The scale that makes this face's em `size` pixels tall. The engine sizes
+    /// text like GDI's CreateFont with a negative height, so a full-width
+    /// character fills its `size` cell; `PxScale` instead fits the
+    /// ascent-to-descent height, which drew faces with tall line boxes
+    /// (PingFang's is 1.4 em) at about 70% of their cell. MS Gothic's line box
+    /// is one em, so the two agree for the original fonts.
+    fn em_scale(&self, size: f32) -> PxScale {
+        let units = self.inner.units_per_em().unwrap_or(0.0);
+        let height = self.inner.height_unscaled();
+        if units <= 0.0 || height <= 0.0 {
+            return PxScale::from(size);
+        }
+        PxScale::from(size * height / units)
+    }
+
+    /// Whether the face's ascent-to-descent height is one em, as GDI's
+    /// Japanese faces are.
+    fn has_em_line_box(&self) -> bool {
+        let units = self.inner.units_per_em().unwrap_or(0.0);
+        units <= 0.0 || (self.inner.height_unscaled() / units - 1.0).abs() <= 0.02
+    }
+
     fn glyph_metrics_internal(&self, ch: char, size: f32, want_bitmap: bool) -> (Metrics, Vec<u8>) {
-        let scale = PxScale::from(size);
+        let scale = self.em_scale(size);
         let scaled = self.inner.as_scaled(scale);
         let glyph_id = self.inner.glyph_id(ch);
         let advance_width = scaled.h_advance(glyph_id);
@@ -502,5 +529,34 @@ mod old_school_tests {
         let (_metrics, bitmap) = font.rasterize('A', 16.0);
         assert_eq!(bitmap.len(), 16 * 16);
         assert_eq!(bitmap[0], 255);
+    }
+}
+
+#[cfg(all(test, not(feature = "old_school")))]
+mod em_tests {
+    use super::*;
+
+    fn fixture(path: &str) -> Option<Font> {
+        Font::from_vec(std::fs::read(path).ok()?).ok()
+    }
+
+    #[test]
+    fn full_width_glyph_fills_its_em() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../rfvp-rebuilder/assets/fonts/BIZUDGothic-Regular.ttf");
+        let font = fixture(path).unwrap();
+        assert!((font.metrics('永', 24.0).advance_width - 24.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn tall_line_box_is_scaled_by_the_em() {
+        // DejaVu Sans's line box is about 1.16 em: by the em, 'M' keeps its
+        // design width (0.863 em) instead of shrinking with the line box.
+        let Some(font) = fixture("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") else {
+            return;
+        };
+        let advance = font.metrics('M', 100.0).advance_width;
+        assert!((advance - 86.3).abs() < 1.0, "advance {advance}");
+        let line = font.horizontal_line_metrics(100.0).unwrap();
+        assert!((line.ascent - 88.0).abs() < 0.01);
     }
 }
